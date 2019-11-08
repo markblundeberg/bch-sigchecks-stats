@@ -4,7 +4,7 @@ Statistics on SigChecks, a replacement for SigOps
 
 These are various python files for analyzing a large dataset derived from the BCH blockchain (which was ~200 GB at time of scan).
 
-- First, download the dataset (~500 MB file) at XXX.
+- First, [download the dataset (~500 MB file)](https://mega.nz/#!DJNwAAyB!K9kw_8uDBR4hZZEor53V4OKiQZgsppge-LFvVPkWVI8).
 - Then, run the various analysis*.py scripts which boil down the data into even smaller files for plotting.
 - Then, run the corresponding plot*.py script.
 
