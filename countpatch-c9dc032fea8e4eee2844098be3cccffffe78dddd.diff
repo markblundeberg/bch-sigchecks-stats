@@ -1,0 +1,300 @@
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index 270926aac..930436b6c 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -101,7 +101,7 @@ static bool IsOpcodeDisabled(opcodetype opcode, uint32_t flags) {
+ 
+ bool EvalScript(std::vector<valtype> &stack, const CScript &script,
+                 uint32_t flags, const BaseSignatureChecker &checker,
+-                ScriptError *serror) {
++                ScriptError *serror, uint32_t *pnSigChecks) {
+     static const CScriptNum bnZero(0);
+     static const CScriptNum bnOne(1);
+     static const valtype vchFalse(0);
+@@ -898,6 +898,10 @@ bool EvalScript(std::vector<valtype> &stack, const CScript &script,
+                             return set_error(serror, SCRIPT_ERR_SIG_NULLFAIL);
+                         }
+ 
++                        if (fSuccess && pnSigChecks) {
++                            *pnSigChecks += 1;
++                        }
++
+                         popstack(stack);
+                         popstack(stack);
+                         stack.push_back(fSuccess ? vchTrue : vchFalse);
+@@ -946,6 +950,10 @@ bool EvalScript(std::vector<valtype> &stack, const CScript &script,
+                             return set_error(serror, SCRIPT_ERR_SIG_NULLFAIL);
+                         }
+ 
++                        if (fSuccess && pnSigChecks) {
++                            *pnSigChecks += 1;
++                        }
++
+                         popstack(stack);
+                         popstack(stack);
+                         popstack(stack);
+@@ -977,6 +985,7 @@ bool EvalScript(std::vector<valtype> &stack, const CScript &script,
+                             nKeysCount > MAX_PUBKEYS_PER_MULTISIG) {
+                             return set_error(serror, SCRIPT_ERR_PUBKEY_COUNT);
+                         }
++                        const int origN = nKeysCount;
+                         nOpCount += nKeysCount;
+                         if (nOpCount > MAX_OPS_PER_SCRIPT) {
+                             return set_error(serror, SCRIPT_ERR_OP_COUNT);
+@@ -1082,6 +1091,11 @@ bool EvalScript(std::vector<valtype> &stack, const CScript &script,
+                         }
+                         popstack(stack);
+ 
++                        if (fSuccess && pnSigChecks) {
++                            // Use original nKeysCount
++                            *pnSigChecks += origN;
++                        }
++
+                         stack.push_back(fSuccess ? vchTrue : vchFalse);
+ 
+                         if (opcode == OP_CHECKMULTISIGVERIFY) {
+@@ -1585,7 +1599,7 @@ bool TransactionSignatureChecker::CheckSequence(
+ 
+ bool VerifyScript(const CScript &scriptSig, const CScript &scriptPubKey,
+                   uint32_t flags, const BaseSignatureChecker &checker,
+-                  ScriptError *serror) {
++                  ScriptError *serror, uint32_t *pnSigChecks) {
+     set_error(serror, SCRIPT_ERR_UNKNOWN_ERROR);
+ 
+     // If FORKID is enabled, we also ensure strict encoding.
+@@ -1598,14 +1612,14 @@ bool VerifyScript(const CScript &scriptSig, const CScript &scriptPubKey,
+     }
+ 
+     std::vector<valtype> stack, stackCopy;
+-    if (!EvalScript(stack, scriptSig, flags, checker, serror)) {
++    if (!EvalScript(stack, scriptSig, flags, checker, serror, pnSigChecks)) {
+         // serror is set
+         return false;
+     }
+     if (flags & SCRIPT_VERIFY_P2SH) {
+         stackCopy = stack;
+     }
+-    if (!EvalScript(stack, scriptPubKey, flags, checker, serror)) {
++    if (!EvalScript(stack, scriptPubKey, flags, checker, serror, pnSigChecks)) {
+         // serror is set
+         return false;
+     }
+@@ -1642,7 +1656,7 @@ bool VerifyScript(const CScript &scriptSig, const CScript &scriptPubKey,
+             return set_success(serror);
+         }
+ 
+-        if (!EvalScript(stack, pubKey2, flags, checker, serror)) {
++        if (!EvalScript(stack, pubKey2, flags, checker, serror, pnSigChecks)) {
+             // serror is set
+             return false;
+         }
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index 526b4c000..eddf1b3ed 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -88,9 +88,10 @@ public:
+ 
+ bool EvalScript(std::vector<std::vector<uint8_t>> &stack, const CScript &script,
+                 uint32_t flags, const BaseSignatureChecker &checker,
+-                ScriptError *error = nullptr);
++                ScriptError *error = nullptr, uint32_t *pnSigChecks = nullptr);
+ bool VerifyScript(const CScript &scriptSig, const CScript &scriptPubKey,
+                   uint32_t flags, const BaseSignatureChecker &checker,
+-                  ScriptError *serror = nullptr);
++                  ScriptError *serror = nullptr,
++                  uint32_t *pnSigChecks = nullptr);
+ 
+ #endif // BITCOIN_SCRIPT_INTERPRETER_H
+diff --git a/src/validation.cpp b/src/validation.cpp
+index ee62eb766..8dd2ba2d2 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -1169,7 +1169,7 @@ bool CScriptCheck::operator()() {
+     return VerifyScript(scriptSig, scriptPubKey, nFlags,
+                         CachingTransactionSignatureChecker(ptxTo, nIn, amount,
+                                                            cacheStore, txdata),
+-                        &error);
++                        &error, pnSigChecks);
+ }
+ 
+ int GetSpendHeight(const CCoinsViewCache &inputs) {
+@@ -1183,7 +1183,8 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
+                  const uint32_t flags, bool sigCacheStore,
+                  bool scriptCacheStore,
+                  const PrecomputedTransactionData &txdata,
+-                 std::vector<CScriptCheck> *pvChecks) {
++                 std::vector<CScriptCheck> *pvChecks,
++                 std::vector<uint32_t> *pvSigChecks) {
+     assert(!tx.IsCoinBase());
+ 
+     // This call does all the inexpensive checks on all the inputs. Only if ALL
+@@ -1196,6 +1197,9 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
+     if (pvChecks) {
+         pvChecks->reserve(tx.vin.size());
+     }
++    if (pvSigChecks) {
++        pvSigChecks->resize(tx.vin.size());
++    }
+ 
+     // Skip script verification when connecting blocks under the assumevalid
+     // block. Assuming the assumevalid block is valid this is safe because
+@@ -1212,7 +1216,10 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
+     // scriptPubKey in the inputs view of that transaction).
+     uint256 hashCacheEntry = GetScriptCacheKey(tx, flags);
+     if (IsKeyInScriptCache(hashCacheEntry, !scriptCacheStore)) {
+-        return true;
++        // DON'T CACHE OUT IF IN CONNECTBLOCK
++        if (!pvSigChecks) {
++            return true;
++        }
+     }
+ 
+     for (size_t i = 0; i < tx.vin.size(); i++) {
+@@ -1228,9 +1235,11 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
+         const CScript &scriptPubKey = coin.GetTxOut().scriptPubKey;
+         const Amount amount = coin.GetTxOut().nValue;
+ 
++        uint32_t *pnSigChecks = pvSigChecks ? &(*pvSigChecks)[i] : nullptr;
++
+         // Verify signature
+         CScriptCheck check(scriptPubKey, amount, tx, i, flags, sigCacheStore,
+-                           txdata);
++                           txdata, pnSigChecks);
+         if (pvChecks) {
+             pvChecks->push_back(std::move(check));
+         } else if (!check()) {
+@@ -1813,6 +1822,9 @@ bool CChainState::ConnectBlock(const Config &config, const CBlock &block,
+         ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION);
+     const uint64_t nMaxSigOpsCount = GetMaxBlockSigOpsCount(currentBlockSize);
+ 
++    // for SigCheck counting (all txns except coinbase)
++    std::vector<std::vector<uint32_t>> vvSigChecks(block.vtx.size());
++
+     blockundo.vtxundo.reserve(block.vtx.size() - 1);
+ 
+     for (const auto &ptx : block.vtx) {
+@@ -1832,8 +1844,11 @@ bool CChainState::ConnectBlock(const Config &config, const CBlock &block,
+         AddCoins(view, tx, pindex->nHeight, true);
+     }
+ 
++    auto pvSigChecks = vvSigChecks.data();
++
+     for (const auto &ptx : block.vtx) {
+         const CTransaction &tx = *ptx;
++
+         if (tx.IsCoinBase()) {
+             continue;
+         }
+@@ -1882,7 +1897,7 @@ bool CChainState::ConnectBlock(const Config &config, const CBlock &block,
+         std::vector<CScriptCheck> vChecks;
+         if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults,
+                          fCacheResults, PrecomputedTransactionData(tx),
+-                         &vChecks)) {
++                         &vChecks, pvSigChecks)) {
+             return error("ConnectBlock(): CheckInputs on %s failed with %s",
+                          tx.GetId().ToString(), FormatStateMessage(state));
+         }
+@@ -1891,6 +1906,8 @@ bool CChainState::ConnectBlock(const Config &config, const CBlock &block,
+ 
+         blockundo.vtxundo.push_back(CTxUndo());
+         SpendCoins(view, tx, blockundo.vtxundo.back(), pindex->nHeight);
++
++        pvSigChecks++;
+     }
+ 
+     int64_t nTime3 = GetTimeMicros();
+@@ -1931,6 +1948,46 @@ bool CChainState::ConnectBlock(const Config &config, const CBlock &block,
+         return true;
+     }
+ 
++
++    std::cout << "#" << (pindex->nHeight) << "\n";
++    pvSigChecks = vvSigChecks.data();
++    for (const auto &ptx : block.vtx) {
++        const CTransaction &tx = *ptx;
++
++        if (tx.IsCoinBase()) {
++            continue;
++        }
++
++        std::string outdata;
++
++        // whether *any* of the inputs have high density sigchecks.
++        // high density = less than 40 bytes of scriptsig per sigcheck.
++        // Of ordinary & standard scripts this will include:
++        //   P2SH multisig 1-of-13, 1-of-14, 1-of-15 ... (more don't fit in p2sh)
++        //   Bare multisig 1-of-2, 1-of-3, ... (more are nonstandard)
++        bool hitdlimit = false;
++
++        // iterate through all inputs, recording script size and number of sigchecks.
++        for (size_t i = 0 ; i < tx.vin.size() ; i++) {
++            int scriptsize = tx.vin[i].scriptSig.size();
++            int sigchecks = (*pvSigChecks)[i];
++            outdata += " ";
++            outdata += std::to_string(scriptsize);
++            outdata += " ";
++            outdata += std::to_string(sigchecks);
++            hitdlimit = hitdlimit || (scriptsize < 50*sigchecks);
++        }
++
++        if (hitdlimit) {
++            std::cout << tx.GetId().GetHex();
++        } else {
++            std::cout << "-";
++        }
++        std::cout << " " << tx.GetTotalSize() << outdata << "\n";
++
++        pvSigChecks++;
++    }
++
+     if (!WriteUndoDataForBlock(blockundo, state, pindex,
+                                config.GetChainParams())) {
+         return false;
+diff --git a/src/validation.h b/src/validation.h
+index d4d2d3f81..1aacd3da2 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -481,7 +481,8 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
+                  const uint32_t flags, bool sigCacheStore,
+                  bool scriptCacheStore,
+                  const PrecomputedTransactionData &txdata,
+-                 std::vector<CScriptCheck> *pvChecks = nullptr);
++                 std::vector<CScriptCheck> *pvChecks = nullptr,
++                 std::vector<uint32_t> *vSigCheck = nullptr);
+ 
+ /**
+  * Mark all the coins corresponding to a given transaction inputs as spent.
+@@ -531,19 +532,22 @@ private:
+     bool cacheStore;
+     ScriptError error;
+     PrecomputedTransactionData txdata;
++    uint32_t *pnSigChecks;
+ 
+ public:
+     CScriptCheck()
+         : amount(), ptxTo(nullptr), nIn(0), nFlags(0), cacheStore(false),
+-          error(SCRIPT_ERR_UNKNOWN_ERROR), txdata() {}
++          error(SCRIPT_ERR_UNKNOWN_ERROR), txdata(), pnSigChecks(nullptr) {}
+ 
+     CScriptCheck(const CScript &scriptPubKeyIn, const Amount amountIn,
+                  const CTransaction &txToIn, unsigned int nInIn,
+                  uint32_t nFlagsIn, bool cacheIn,
+-                 const PrecomputedTransactionData &txdataIn)
++                 const PrecomputedTransactionData &txdataIn,
++                 uint32_t *pnSigChecksIn = nullptr)
+         : scriptPubKey(scriptPubKeyIn), amount(amountIn), ptxTo(&txToIn),
+           nIn(nInIn), nFlags(nFlagsIn), cacheStore(cacheIn),
+-          error(SCRIPT_ERR_UNKNOWN_ERROR), txdata(txdataIn) {}
++          error(SCRIPT_ERR_UNKNOWN_ERROR), txdata(txdataIn),
++          pnSigChecks(pnSigChecksIn) {}
+ 
+     bool operator()();
+ 
+@@ -556,6 +560,7 @@ public:
+         std::swap(cacheStore, check.cacheStore);
+         std::swap(error, check.error);
+         std::swap(txdata, check.txdata);
++        std::swap(pnSigChecks, check.pnSigChecks);
+     }
+ 
+     ScriptError GetScriptError() const { return error; }
