@@ -21,3 +21,7 @@ This has the following format. Each line is a transaction, except for the lines 
 # 1235                <- end of block 1234; the following transactions come from block 1235
 ...
 ```
+
+## Collection
+
+The data was collected using the patch found in this directory. It works by completely disabling script cache lookups during ConnectBlock. To use this patch, set up a new node (for compactness and efficiency, set it up in pruning and blocksonly mode) that feeds only from your main node, and run it with assumevalid off. This will take some time as it needs to fully validate the blockchain.
